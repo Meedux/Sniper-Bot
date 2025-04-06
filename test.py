@@ -15,15 +15,11 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.common.action_chains import ActionChains
+from selenium.webdriver.common.keys import Keys
 from selenium.common.exceptions import TimeoutException, NoSuchElementException, ElementClickInterceptedException, StaleElementReferenceException
 
-# Import TwoCaptcha for automated CAPTCHA solving
-try:
-    from twocaptcha import TwoCaptcha
-    CAPTCHA_SOLVER_AVAILABLE = True
-except ImportError:
-    CAPTCHA_SOLVER_AVAILABLE = False
-    logging.warning("TwoCaptcha module not found. To enable automated CAPTCHA solving, install it with: pip install 2captcha-python")
+# Path to the Buster CAPTCHA solver extension
+BUSTER_EXTENSION_PATH = "buster.crx"
 
 if sys.stdout.encoding != 'utf-8':
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
@@ -55,26 +51,16 @@ class RedditAccountSniperBot:
         self.coupon_code = ""
         self.search_keyword = "50x"  # Added search keyword for 50x accounts
         
-        # CAPTCHA solving configuration
-        self.captcha_api_key = ""
-        self.captcha_solver = None
-        
         if config_file and os.path.exists(config_file):
             self.load_config(config_file)
         else:
             logger.warning("No configuration file provided or file not found. Using default values.")
         
-        # Initialize CAPTCHA solver if API key is provided
-        if self.captcha_api_key and CAPTCHA_SOLVER_AVAILABLE:
-            try:
-                self.captcha_solver = TwoCaptcha(self.captcha_api_key)
-                logger.info("CAPTCHA solver initialized with API key")
-            except Exception as e:
-                logger.error(f"Failed to initialize CAPTCHA solver: {str(e)}")
-        
         self.chrome_options = Options()
         if self.headless:
+            logger.warning("Headless mode may affect CAPTCHA solving")
             self.chrome_options.add_argument("--headless=new")  # Using newer headless mode
+            
         self.chrome_options.add_argument("--window-size=1920,1080")
         self.chrome_options.add_argument("--disable-notifications")
         self.chrome_options.add_argument("--disable-popup-blocking")
@@ -88,17 +74,19 @@ class RedditAccountSniperBot:
         self.chrome_options.add_argument("--disable-dev-shm-usage")
         self.chrome_options.add_argument("--no-sandbox")
         self.chrome_options.add_argument("--ignore-certificate-errors")
-        self.chrome_options.add_argument("--blink-settings=imagesEnabled=false")  # Speed up by disabling images
+        
+        # We need images enabled for CAPTCHA solving
+        self.chrome_options.add_argument("--blink-settings=imagesEnabled=true")
         
         # Prevent detection
         self.chrome_options.add_experimental_option('excludeSwitches', ['enable-logging', 'enable-automation'])
         self.chrome_options.add_experimental_option('useAutomationExtension', False)
+        self.chrome_options.add_argument("--disable-blink-features=AutomationControlled")
         
         user_agents = [
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36",
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36",
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.3 Safari/605.1.15",
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/110.0"
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36"
         ]
         self.chrome_options.add_argument(f"--user-agent={random.choice(user_agents)}")
         
@@ -107,19 +95,14 @@ class RedditAccountSniperBot:
         if self.max_price:
             logger.info("Maximum price set to: $%.2f", self.max_price)
         
-        if self.captcha_api_key:
-            if not CAPTCHA_SOLVER_AVAILABLE:
-                logger.error("CAPTCHA API key provided but 2captcha-python package is not installed")
-                logger.error("Please install it with: pip install 2captcha-python")
-            else:
-                try:
-                    self.captcha_solver = TwoCaptcha(self.captcha_api_key)
-                    logger.info("2Captcha solver initialized with API key")
-                except Exception as e:
-                    logger.error(f"Failed to initialize 2Captcha solver: {str(e)}")
-        else:
-            logger.warning("No CAPTCHA API key provided - automated CAPTCHA solving will not be available")
-            logger.warning("Please add a 2Captcha API key to your config file")
+        self.test_mode = getattr(self, 'test_mode', False)
+        
+        # Try to import the GoogleRecaptchaBypass library to check if it's installed
+        try:
+            import RecaptchaSolver
+            logger.info("GoogleRecaptchaBypass library detected")
+        except ImportError:
+            logger.warning("GoogleRecaptchaBypass library not found. Please install it with: pip install GoogleRecaptchaBypass")
     
     def load_config(self, config_file):
         try:
@@ -134,9 +117,6 @@ class RedditAccountSniperBot:
             self.debug_mode = config.get('debug_mode', False)
             self.coupon_code = config.get('coupon_code', "")
             self.search_keyword = config.get('search_keyword', self.search_keyword)
-
-            # Load CAPTCHA solver configuration
-            self.captcha_api_key = config.get('captcha_api_key', "")
             
             self.test_mode = config.get('test_mode', False)
             if self.test_mode:
@@ -158,22 +138,34 @@ class RedditAccountSniperBot:
             logger.error("Error loading configuration file: %s", str(e))
     
     def start_browser(self):
-        logger.info("Starting browser session")
-        service = Service(ChromeDriverManager().install())
-        self.driver = webdriver.Chrome(service=service, options=self.chrome_options)
+        logger.info("Starting browser session...")
         
-        # Prevent bot detection
-        self.driver.execute_cdp_cmd('Network.setUserAgentOverride', {"userAgent": self.driver.execute_script("return navigator.userAgent").replace("Headless", "")})
-        self.driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-        
-        self.wait = WebDriverWait(self.driver, 10)
-        self.long_wait = WebDriverWait(self.driver, 30)
-        self.short_wait = WebDriverWait(self.driver, 5)
-        self.actions = ActionChains(self.driver)
-        
-        # Maximize window for better visibility
-        self.driver.maximize_window()
-        return self.driver
+        try:
+            # Use the cached ChromeDriver if available
+            service = Service(ChromeDriverManager().install())
+            self.driver = webdriver.Chrome(service=service, options=self.chrome_options)
+            
+            # Prevent bot detection
+            self.driver.execute_cdp_cmd('Network.setUserAgentOverride', 
+                                     {"userAgent": self.driver.execute_script("return navigator.userAgent").replace("Headless", "")})
+            self.driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+            
+            # Setup wait times
+            self.wait = WebDriverWait(self.driver, 10)
+            self.long_wait = WebDriverWait(self.driver, 30)
+            self.short_wait = WebDriverWait(self.driver, 5)
+            self.actions = ActionChains(self.driver)
+            
+            # Maximize window for better visibility
+            self.driver.maximize_window()
+            logger.info("Browser session started successfully")
+            return self.driver
+            
+        except Exception as e:
+            logger.error(f"Error starting browser session: {str(e)}")
+            if hasattr(self, 'driver'):
+                self.driver.quit()
+            raise
     
     def close_browser(self):
         if hasattr(self, 'driver'):
@@ -288,6 +280,7 @@ class RedditAccountSniperBot:
                 
                 time.sleep(3)  # Reduced wait time
                 
+                # Check for successful login
                 for indicator in logged_in_indicators:
                     try:
                         if self.driver.find_element(By.XPATH, f"//*[contains(@class, '{indicator}') or contains(text(), '{indicator}')]"):
@@ -371,43 +364,45 @@ class RedditAccountSniperBot:
             return False
     
     def find_and_click_account_by_keyword(self):
-        """Find account listing with 50x keyword and click the buy button"""
+        """Find account listing with keyword and click the buy button"""
         try:
             logger.info(f"Searching for accounts with keyword: {self.search_keyword}...")
             
             # Force page elements to load
             self.force_page_load()
             
-            # Find all table cells
-            cells = self.driver.find_elements(By.TAG_NAME, "td")
-            if not cells:
-                logger.warning("No table cells found")
+            # Wait 5 seconds before searching table rows to ensure content is fully loaded
+            logger.info("Waiting 5 seconds for table content to stabilize...")
+            time.sleep(5)
+            
+            # Find all table rows
+            rows = self.driver.find_elements(By.TAG_NAME, "tr")
+            if not rows:
+                logger.warning("No table rows found")
                 return False
             
-            logger.info(f"Found {len(cells)} table cells to search")
+            logger.info(f"Found {len(rows)} table rows to search")
             
             matching_row = None
             
-            # Search each TD for the keyword
-            for cell in cells:
+            # Search each TR for the keyword
+            for row in rows:
                 try:
-                    cell_text = cell.text.strip()
+                    row_text = row.text.strip()
                     
-                    # Check if cell contains the keyword
-                    if self.search_keyword.lower() in cell_text.lower():
-                        logger.info(f"Found matching cell with text: {cell_text}")
-                        
-                        # Get the parent row
-                        matching_row = cell.find_element(By.XPATH, "./..")
+                    # Check if row contains the keyword
+                    if self.search_keyword.lower() in row_text.lower():
+                        logger.info(f"Found matching row with text: {row_text}")
+                        matching_row = row
                         break
                 
                 except StaleElementReferenceException:
                     continue
                 except Exception as e:
-                    logger.error(f"Error processing cell: {str(e)}")
+                    logger.error(f"Error processing row: {str(e)}")
             
             if not matching_row:
-                logger.warning(f"No cells found containing keyword: {self.search_keyword}")
+                logger.warning(f"No rows found containing keyword: {self.search_keyword}")
                 return False
             
             # Find buy button in the matching row
@@ -448,7 +443,7 @@ class RedditAccountSniperBot:
                 logger.error("Failed to click buy button")
                 return False
             
-            # Wait 5 seconds as specified
+            # Wait 5 seconds as specified for content to load
             logger.info("Waiting 5 seconds for content to fully load...")
             time.sleep(5)
             
@@ -535,238 +530,194 @@ class RedditAccountSniperBot:
             return False
     
     def detect_captcha(self):
-        """Detect if captcha is present on the page"""
-        captcha_indicators = [
-            "g-recaptcha",
-            "recaptcha",
-            "h-captcha",
-            "hcaptcha",
-            "captcha"
-        ]
-        
-        captcha_data = {}
-        page_source = self.driver.page_source.lower()
-        
-        # Fast check in page source first
-        for indicator in captcha_indicators:
-            if indicator in page_source:
-                logger.warning(f"CAPTCHA indicator found in page source: {indicator}")
+        """Detect if captcha is present on the page and return its type (recaptcha/hcaptcha)"""
+        try:
+            # Look for reCAPTCHA iframe
+            recaptcha_iframe = self.driver.find_elements(By.CSS_SELECTOR, 'iframe[src*="google.com/recaptcha"]')
+            if recaptcha_iframe:
+                logger.info("reCAPTCHA detected on the page")
+                return True, "recaptcha", recaptcha_iframe[0]
+            
+            # Look for hCaptcha iframe
+            hcaptcha_iframe = self.driver.find_elements(By.CSS_SELECTOR, 'iframe[src*="hcaptcha.com"]')
+            if hcaptcha_iframe:
+                logger.info("hCaptcha detected on the page")
+                return True, "hcaptcha", hcaptcha_iframe[0]
+            
+            # No CAPTCHA found
+            return False, None, None
+            
+        except Exception as e:
+            logger.error(f"Error detecting CAPTCHA: {str(e)}")
+            return False, None, None
+    
+    def solve_captcha(self):
+        try:
+            self.driver.switch_to.default_content()
+            logger.info("Starting CAPTCHA solution process with RecaptchaSolver...")
+            
+            if self.debug_mode:
+                self.driver.save_screenshot("captcha_initial.png")
+            
+            # Check if reCAPTCHA is present
+            recaptcha_present = False
+            
+            try:
+                iframes = self.driver.find_elements(By.TAG_NAME, "iframe")
+                for iframe in iframes:
+                    src = iframe.get_attribute("src") or ""
+                    if "google.com/recaptcha" in src:
+                        recaptcha_present = True
+                        break
+            except Exception as e:
+                logger.error(f"Error detecting reCAPTCHA: {str(e)}")
+            
+            if not recaptcha_present:
+                logger.info("No reCAPTCHA detected on the page")
+                return True
+            
+            logger.info("reCAPTCHA detected, attempting to solve...")
+            
+            try:
+                # Import the RecaptchaSolver
+                from RecaptchaSolver import RecaptchaSolver
                 
-                # Verify with DOM elements
                 try:
-                    captcha_elements = self.driver.find_elements(By.XPATH, 
-                                                            f"//*[contains(@class, '{indicator}') or contains(@id, '{indicator}')]")
-                    if captcha_elements:
-                        logger.warning(f"CAPTCHA element confirmed on page ({indicator})")
+                    # Create a new ChromiumPage (without any arguments as in captcha_test.py)
+                    from DrissionPage import ChromiumPage
+                    
+                    # Get the current URL where the CAPTCHA is
+                    current_url = self.driver.current_url
+                    
+                    # Create a fresh ChromiumPage instance
+                    page = ChromiumPage()  # No arguments - matches your sample code
+                    
+                    # First login with the new browser if credentials are provided
+                    if self.user_email and self.user_password:
+                        logger.info("Logging in with ChromiumPage before solving CAPTCHA...")
                         
-                        # Gather information about the CAPTCHA
-                        if "g-recaptcha" in indicator or "recaptcha" in indicator:
-                            captcha_data['type'] = 'recaptcha'
+                        # Navigate to login page
+                        page.get("https://redaccs.com/my-account/")
+                        
+                        # Wait for page to load
+                        time.sleep(3)
+                        
+                        # Fill username and password
+                        try:
+                            username_field = page.ele('#username')
+                            password_field = page.ele('#password')
                             
-                            # Look for site key
-                            site_key_match = re.search(r'data-sitekey=["\']([^"\']+)["\']', page_source)
-                            if site_key_match:
-                                captcha_data['site_key'] = site_key_match.group(1)
+                            if username_field and password_field:
+                                username_field.input(self.user_email)
+                                password_field.input(self.user_password)
                                 
-                        elif "hcaptcha" in indicator or "h-captcha" in indicator:
-                            captcha_data['type'] = 'hcaptcha'
-                            
-                            # Look for site key
-                            site_key_match = re.search(r'data-sitekey=["\']([^"\']+)["\']', page_source)
-                            if site_key_match:
-                                captcha_data['site_key'] = site_key_match.group(1)
+                                # Click login button
+                                login_button = page.ele('button[name="login"]')
+                                if login_button:
+                                    login_button.click()
+                                    logger.info("Login credentials submitted in ChromiumPage")
+                                    time.sleep(3)  # Wait for login to complete
+                                else:
+                                    logger.warning("Login button not found in ChromiumPage")
+                            else:
+                                logger.warning("Login fields not found in ChromiumPage")
+                        except Exception as e:
+                            logger.error(f"Error during ChromiumPage login: {str(e)}")
+                    
+                    # Navigate to the same URL where the CAPTCHA is
+                    page.get(current_url)
+                    logger.info(f"Navigated to CAPTCHA page: {current_url}")
+                    
+                    # Give the page time to load
+                    time.sleep(3)
+                    
+                    # Initialize and use the RecaptchaSolver
+                    solver = RecaptchaSolver(page)
+                    logger.info("Solving reCAPTCHA using RecaptchaSolver...")
+                    solver.solveCaptcha()
+                    
+                    # Get token if available
+                    token = solver.get_token()
+                    if token:
+                        logger.info("Successfully obtained reCAPTCHA token")
                         
-                        return True, captcha_data
-                except Exception as e:
-                    logger.error(f"Error analyzing CAPTCHA element: {str(e)}")
-        
-        return False, captcha_data
-    
-    def solve_recaptcha(self, site_key):
-        """Solve reCAPTCHA using 2Captcha service with better error handling"""
-        if not self.captcha_solver:
-            logger.error("CAPTCHA solver not initialized")
-            return None
-            
-        try:
-            logger.info("Sending reCAPTCHA to 2Captcha for solving...")
-            logger.info(f"Using site key: {site_key}")
-            
-            # Get the page URL
-            page_url = self.driver.current_url
-            
-            # Add additional parameters to improve solving accuracy
-            result = self.captcha_solver.recaptcha(
-                sitekey=site_key,
-                url=page_url,
-                invisible=1,  # Try with invisible recaptcha option
-                enterprise=0  # Set to 1 if it's an enterprise reCAPTCHA
-            )
-            
-            if result.get('code') == 'OK':
-                logger.info("2Captcha successfully solved the reCAPTCHA!")
-                return result.get('token')
-            else:
-                logger.error(f"2Captcha failed to solve reCAPTCHA: {result}")
-                return None
-                
-        except Exception as e:
-            logger.error(f"Error communicating with 2Captcha service: {str(e)}")
-            return None
-    
-    def solve_hcaptcha(self, site_key):
-        """Solve hCaptcha using 2Captcha service with better error handling"""
-        if not self.captcha_solver:
-            logger.error("CAPTCHA solver not initialized")
-            return None
-            
-        try:
-            logger.info("Sending hCaptcha to 2Captcha for solving...")
-            logger.info(f"Using site key: {site_key}")
-            
-            # Get the page URL
-            page_url = self.driver.current_url
-            
-            result = self.captcha_solver.hcaptcha(
-                sitekey=site_key,
-                url=page_url
-            )
-            
-            if result.get('code') == 'OK':
-                logger.info("2Captcha successfully solved the hCaptcha!")
-                return result.get('token')
-            else:
-                logger.error(f"2Captcha failed to solve hCaptcha: {result}")
-                return None
-                
-        except Exception as e:
-            logger.error(f"Error communicating with 2Captcha service: {str(e)}")
-            return None
-    
-    def submit_captcha_solution(self, token, captcha_type):
-        """Submit the CAPTCHA solution to the page"""
-        if not token:
-            return False
-            
-        try:
-            if captcha_type == 'recaptcha':
-                # Submit the solution for reCAPTCHA
-                self.driver.execute_script(
-                    "document.getElementById('g-recaptcha-response').innerHTML = arguments[0];", token)
-                
-                # Trigger the callback
-                self.driver.execute_script(
-                    "___grecaptcha_cfg.clients[0].callback(arguments[0]);", token)
-                
-            elif captcha_type == 'hcaptcha':
-                # Submit the solution for hCaptcha
-                self.driver.execute_script(
-                    "document.querySelector('textarea[name=\"h-captcha-response\"]').innerHTML = arguments[0];", token)
-                
-                # Submit the form or trigger callback
-                self.driver.execute_script(
-                    "document.querySelector('form').submit();")
-                
-            # Wait for the CAPTCHA to process
-            time.sleep(2)
-            
-            # Verify if CAPTCHA is no longer present
-            is_captcha, _ = self.detect_captcha()
-            if not is_captcha:
-                logger.info("CAPTCHA successfully solved and submitted!")
-                return True
-            else:
-                logger.warning("CAPTCHA solution was submitted but CAPTCHA still appears to be present")
+                        # Apply the token to the original Selenium driver
+                        self.driver.execute_script(f"""
+                            try {{
+                                document.querySelector('[name="g-recaptcha-response"]').innerHTML = "{token}";
+                            }} catch(e) {{}}
+                            
+                            var textareas = document.getElementsByTagName('textarea');
+                            for (var i = 0; i < textareas.length; i++) {{
+                                if (textareas[i].name == 'g-recaptcha-response') {{
+                                    textareas[i].innerHTML = "{token}";
+                                }}
+                            }}
+                            
+                            if (typeof ___grecaptcha_cfg !== 'undefined') {{
+                                for (var key in ___grecaptcha_cfg.clients) {{
+                                    if (___grecaptcha_cfg.clients[key].hasOwnProperty('callback')) {{
+                                        try {{
+                                            ___grecaptcha_cfg.clients[key]['callback']("{token}");
+                                            break;
+                                        }} catch(e) {{}}
+                                    }}
+                                }}
+                            }}
+                        """)
+                        
+                        logger.info("reCAPTCHA token applied to the page")
+                        time.sleep(2)
+                        return True
+                    else:
+                        logger.error("Failed to get reCAPTCHA token")
+                        
+                    # Check if it was solved even without getting the token
+                    if solver.is_solved():
+                        logger.info("reCAPTCHA appears to be solved without token retrieval")
+                        return True
+                        
+                    logger.error("RecaptchaSolver failed to solve the CAPTCHA")
+                    return False
+                        
+                except ImportError as e:
+                    logger.error(f"DrissionPage library not installed or has issues: {str(e)}")
+                    logger.error("Please install it with: pip install DrissionPage")
+                    return False
+                        
+            except ImportError as e:
+                logger.error(f"RecaptchaSolver not properly installed or has missing dependencies: {str(e)}")
+                logger.error("Please ensure RecaptchaSolver.py is in the current directory")
+                return False
+                    
+            except Exception as e:
+                logger.error(f"Error using RecaptchaSolver: {str(e)}")
                 return False
                 
         except Exception as e:
-            logger.error(f"Error submitting CAPTCHA solution: {str(e)}")
-            return False
-    
-    def handle_captcha(self):
-        """Handle captcha using 2Captcha service exclusively"""
-        is_captcha, captcha_data = self.detect_captcha()
-        
-        if not is_captcha:
-            return True
-            
-        logger.warning("CAPTCHA detected - using 2Captcha to solve automatically")
-        
-        # Check if we have the required components for automated solving
-        if not CAPTCHA_SOLVER_AVAILABLE:
-            logger.error("CAPTCHA detected but 2Captcha package is not installed")
-            logger.error("Please run: pip install 2captcha-python")
+            logger.error(f"Unexpected error in CAPTCHA solving: {str(e)}")
+            if self.debug_mode:
+                self.save_debug_info("captcha_error")
             return False
             
-        if not self.captcha_api_key:
-            logger.error("CAPTCHA detected but no API key is configured")
-            logger.error("Please add your 2Captcha API key to the config file")
-            return False
-        
-        if not self.captcha_solver:
-            logger.error("CAPTCHA solver not initialized despite API key being present")
-            logger.error("This is likely an internal error - please check the logs")
-            return False
-        
-        if 'type' not in captcha_data or 'site_key' not in captcha_data:
-            logger.error("CAPTCHA detected but could not determine type or site key")
-            logger.error("The CAPTCHA may be of an unsupported type")
-            return False
-        
-        # Proceed with automated solving
-        captcha_type = captcha_data['type']
-        site_key = captcha_data['site_key']
-        
-        # Attempt to solve with retries
-        max_solve_attempts = 3
-        for attempt in range(1, max_solve_attempts + 1):
-            logger.info(f"CAPTCHA solving attempt {attempt}/{max_solve_attempts}")
-            
-            token = None
-            if captcha_type == 'recaptcha':
-                token = self.solve_recaptcha(site_key)
-            elif captcha_type == 'hcaptcha':
-                token = self.solve_hcaptcha(site_key)
-            else:
-                logger.error(f"Unsupported CAPTCHA type: {captcha_type}")
-                return False
-                
-            if not token:
-                logger.error(f"Failed to get solution token from 2Captcha service (attempt {attempt})")
-                if attempt < max_solve_attempts:
-                    logger.info("Waiting 5 seconds before retrying...")
-                    time.sleep(5)
-                    continue
-                else:
-                    logger.error("Maximum solving attempts reached. Could not solve CAPTCHA automatically.")
-                    return False
-            
-            # We have a token, attempt to submit it
-            if self.submit_captcha_solution(token, captcha_type):
-                logger.info("CAPTCHA solved successfully by 2Captcha!")
-                return True
-            else:
-                logger.error(f"Failed to submit CAPTCHA solution (attempt {attempt})")
-                if attempt < max_solve_attempts:
-                    logger.info("Waiting 5 seconds before retrying...")
-                    time.sleep(5)
-                else:
-                    logger.error("Maximum submission attempts reached. Could not apply CAPTCHA solution.")
-                    return False
-        
-        # We should never reach here due to the returns above, but just in case
-        return False
-    
     def complete_order(self):
-        """Find and click the place_order button"""
+        """Find and click the place_order button, handling CAPTCHA if present"""
         try:
-            # Handle captcha if present
-            if not self.handle_captcha():
-                logger.error("Failed to handle captcha")
-                return False
+            logger.info("Checking for CAPTCHA before completing order...")
+            
+            # Check for CAPTCHA and solve it
+            has_captcha, captcha_type, _ = self.detect_captcha()
+            if has_captcha:
+                logger.info(f"{captcha_type} detected on checkout page, attempting to solve...")
+                if not self.solve_captcha():
+                    logger.error(f"Failed to solve {captcha_type}")
+                    self.save_debug_info("captcha_failure")
+                    return False
+                logger.info("CAPTCHA solved successfully")
             
             logger.info("Looking for place_order button...")
             
+            # Find and click the place_order button
             place_order_button = self.wait.until(
                 EC.element_to_be_clickable((By.ID, "place_order"))
             )
@@ -807,20 +758,17 @@ class RedditAccountSniperBot:
             return False
     
     def purchase_reddit_account(self):
-        """Full purchase flow for a Reddit account with explicit CAPTCHA handling"""
+        """Full purchase flow for a Reddit account with Buster CAPTCHA handling"""
         try:
-            # Verify 2Captcha is properly set up before starting
-            if not self.captcha_api_key or not CAPTCHA_SOLVER_AVAILABLE:
-                logger.error("Cannot proceed with purchase - 2Captcha is not properly configured")
-                logger.error("Please install 2captcha-python and provide a valid API key")
-                return False
+            # Start the process
+            logger.info("Starting Reddit account purchase process...")
             
             # Step 1: Navigate to accounts page
             if not self.navigate_to_acc_page():
                 logger.error("Failed to navigate to Reddit accounts page")
                 return False
             
-            # Step 2: Find and click account with 50x keyword
+            # Step 2: Find and click account with matching keyword
             if not self.find_and_click_account_by_keyword():
                 logger.error("Failed to find and select an account")
                 return False
@@ -847,24 +795,120 @@ class RedditAccountSniperBot:
         try:
             self.start_browser()
         
+            # Login only if credentials were provided
             if self.user_email and self.user_password:
                 if not self.login_if_needed():
                     logger.error("Failed to log in, aborting")
                     return
-                else:
-                    logger.info("Login successful")
+                logger.info("Login successful")
             
-            logger.info("Starting Reddit account purchase process")
+            # Set up monitoring loop
+            max_attempts = 5
+            attempt_count = 0
+            refresh_delay = self.refresh_interval  # Use the configured refresh interval
             
-            if self.purchase_reddit_account():
-                logger.info("Successfully completed Reddit account purchase!")
-            else:
-                logger.error("Failed to purchase Reddit account")
+            logger.info(f"Starting monitoring loop with {max_attempts} attempts, refreshing every {refresh_delay} seconds")
+            
+            while attempt_count < max_attempts:
+                attempt_count += 1
+                logger.info(f"Monitoring attempt {attempt_count} of {max_attempts}")
+                
+                # Navigate to target URL for the first attempt or when explicitly needed
+                if attempt_count == 1:
+                    logger.info(f"Navigating to target URL: {self.target_url}")
+                    self.driver.get(self.target_url)
+                    time.sleep(3)
+                
+                # Start the purchase process
+                logger.info("Starting Reddit account purchase process")
+                
+                purchase_successful = False
+                
+                try:
+                    # Force page load first to ensure content is visible
+                    self.force_page_load()
+                    
+                    # Check if any tables are present
+                    table_rows = self.driver.find_elements(By.TAG_NAME, "tr")
+                    
+                    # If no table rows found, try clicking the reset button
+                    if not table_rows:
+                        logger.warning("No table rows found, trying to click reset button")
+                        try:
+                            reset_buttons = self.driver.find_elements(By.CLASS_NAME, "reset")
+                            if reset_buttons:
+                                logger.info("Found reset button, clicking it")
+                                reset_buttons[0].click()
+                                time.sleep(5)  # Give time for the page to reset
+                                self.force_page_load()  # Force page load again after reset
+                            else:
+                                logger.warning("No reset button found, refreshing page")
+                                self.driver.refresh()
+                                time.sleep(5)
+                        except Exception as e:
+                            logger.error(f"Error clicking reset button: {str(e)}")
+                            # Navigate directly to target URL as fallback
+                            self.driver.get(self.target_url)
+                            time.sleep(5)
+                    
+                    # Step 1: Find and click account with matching keyword
+                    if self.find_and_click_account_by_keyword():
+                        logger.info("Found matching account, proceeding with purchase...")
+                        
+                        # Step 2: Apply coupon and fill checkout info
+                        if self.apply_coupon_and_checkout():
+                            logger.info("Checkout form completed, proceeding to complete order")
+                            
+                            # Step 3: Complete the order (includes CAPTCHA handling)
+                            if self.complete_order():
+                                logger.info("Successfully purchased Reddit account!")
+                                purchase_successful = True
+                                break  # Exit the loop if successful
+                            else:
+                                logger.error("Failed to complete the order")
+                        else:
+                            logger.error("Failed to apply coupon and fill checkout form")
+                    else:
+                        logger.warning(f"No matching accounts found in attempt {attempt_count}/{max_attempts}")
+                        
+                        # Try clicking the reset button if account not found
+                        logger.info("Clicking reset button to refresh available accounts")
+                        try:
+                            reset_buttons = self.driver.find_elements(By.CLASS_NAME, "reset")
+                            if reset_buttons:
+                                reset_buttons[0].click()
+                                time.sleep(5)  # Give time for the page to refresh
+                            else:
+                                # Fallback to direct page refresh
+                                logger.warning("Reset button not found, refreshing page directly")
+                                self.driver.refresh()
+                                time.sleep(5)
+                        except Exception as e:
+                            logger.error(f"Error clicking reset button: {str(e)}")
+                    
+                except Exception as e:
+                    logger.error(f"Error during purchase process in attempt {attempt_count}: {str(e)}")
+                    self.save_debug_info(f"error_attempt_{attempt_count}")
+                    
+                    # Try to recover by refreshing the page
+                    try:
+                        logger.info("Attempting to recover by refreshing the page")
+                        self.driver.get(self.target_url)
+                        time.sleep(5)
+                    except:
+                        pass
+                
+                # Continue to next attempt if not successful
+                if not purchase_successful and attempt_count < max_attempts:
+                    logger.info(f"Waiting {refresh_delay} seconds before next attempt...")
+                    time.sleep(refresh_delay)
+                elif not purchase_successful:
+                    logger.warning("Maximum monitoring attempts reached without successful purchase")
             
         except KeyboardInterrupt:
             logger.info("Bot stopped by user")
         except Exception as e:
-            logger.error(f"Unexpected error: {str(e)}")
+            logger.error(f"Unexpected error in main process: {str(e)}")
             self.save_debug_info("unexpected_error")
         finally:
             self.close_browser()
@@ -875,7 +919,6 @@ if __name__ == "__main__":
     print("="*80)
     
     config_file = "reddit_sniper_config.json"
-    
     
     if not os.path.exists(config_file):
         print(f"Config file '{config_file}' not found.")
@@ -891,7 +934,6 @@ if __name__ == "__main__":
             "debug_mode": True,
             "search_keyword": "50x",
             "coupon_code": "YOUR_COUPON_HERE",
-            "captcha_api_key": "YOUR_2CAPTCHA_API_KEY",
             "credentials": {
                 "email": "your_email@example.com",
                 "password": "your_password"
@@ -908,12 +950,10 @@ if __name__ == "__main__":
         print(f"Example config file created at '{config_file}'")
         print("Edit this file with your information, then run the script again.")
         print("\nTo enable automated CAPTCHA solving:")
-        print("1. Install the 2captcha module: pip install 2captcha-python")
-        print("2. Get an API key from https://2captcha.com/")
-        print("3. Add your API key to the config file")
+        print("1. Download the Buster extension from Chrome Web Store")
+        print("2. Export the extension as buster.crx and place it in the same directory as this script")
         exit(1)
-
     
-    
+    # Create and run the bot
     bot = RedditAccountSniperBot(config_file)
     bot.run()
