@@ -141,9 +141,62 @@ class RedditAccountSniperBot:
         logger.info("Starting browser session...")
         
         try:
-            # Use the cached ChromeDriver if available
-            service = Service(ChromeDriverManager().install())
-            self.driver = webdriver.Chrome(service=service, options=self.chrome_options)
+            # Prioritize using the local chromedriver.exe that exists in the same directory
+            if os.path.exists("chromedriver.exe"):
+                logger.info("Found local chromedriver.exe, using it directly")
+                try:
+                    service = Service(executable_path=os.path.abspath("chromedriver.exe"))
+                    self.driver = webdriver.Chrome(service=service, options=self.chrome_options)
+                    logger.info("Chrome started successfully using local chromedriver.exe")
+                except Exception as e:
+                    logger.error(f"Error using local chromedriver.exe: {str(e)}")
+                    # If specific architecture error, provide clear guidance
+                    if "not a valid Win32 application" in str(e):
+                        logger.error("The chromedriver.exe is not compatible with your system architecture.")
+                        logger.error("Please download the correct version for your system (32-bit or 64-bit).")
+                        logger.error("Visit: https://googlechromelabs.github.io/chrome-for-testing/")
+                    raise
+            else:
+                # Fallback to webdriver-manager if local chromedriver.exe not found
+                logger.info("No local chromedriver.exe found, using webdriver-manager")
+                
+                # Try to find Chrome version to download matching driver
+                import subprocess
+                import re
+                
+                # Try to determine Chrome version
+                chrome_version = None
+                try:
+                    # For Windows
+                    process = subprocess.Popen(
+                        r'reg query "HKEY_CURRENT_USER\Software\Google\Chrome\BLBeacon" /v version',
+                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True
+                    )
+                    output, error = process.communicate()
+                    if output:
+                        match = re.search(r'version\s+REG_SZ\s+([\d\.]+)', output.decode('utf-8'))
+                        if match:
+                            chrome_version = match.group(1)
+                            logger.info(f"Detected Chrome version: {chrome_version}")
+                except Exception as e:
+                    logger.warning(f"Could not determine Chrome version: {str(e)}")
+                
+                # Create a service
+                if chrome_version:
+                    # Extract major version
+                    major_version = chrome_version.split('.')[0]
+                    try:
+                        service = Service(ChromeDriverManager(version=major_version).install())
+                        logger.info(f"Using ChromeDriver version matching Chrome {major_version}")
+                    except Exception as e:
+                        logger.warning(f"Failed to find ChromeDriver for version {major_version}, falling back to latest: {str(e)}")
+                        service = Service(ChromeDriverManager().install())
+                else:
+                    service = Service(ChromeDriverManager().install())
+                    
+                # Start the browser with the service
+                self.driver = webdriver.Chrome(service=service, options=self.chrome_options)
+                logger.info("Chrome started successfully using webdriver-manager")
             
             # Prevent bot detection
             self.driver.execute_cdp_cmd('Network.setUserAgentOverride', 
@@ -162,9 +215,26 @@ class RedditAccountSniperBot:
             return self.driver
             
         except Exception as e:
-            logger.error(f"Error starting browser session: {str(e)}")
+            detailed_error = str(e)
+            logger.error(f"Error starting browser session: {detailed_error}")
+            
+            # Provide specific guidance based on common errors
+            if "not a valid Win32 application" in detailed_error:
+                logger.error("This error typically means you're using a chromedriver.exe that's incompatible with your system.")
+                logger.error("Your Chrome browser and system might be 64-bit while chromedriver.exe is 32-bit (or vice versa).")
+                logger.error("Please download the correct chromedriver.exe version for your system from:")
+                logger.error("https://googlechromelabs.github.io/chrome-for-testing/")
+            elif "Chrome failed to start" in detailed_error:
+                logger.error("Chrome browser failed to start. Make sure Chrome is installed and not running in crash-recovery mode.")
+            elif "session not created" in detailed_error:
+                logger.error("Session not created. This typically means the chromedriver.exe version doesn't match your Chrome browser version.")
+                logger.error("Download the matching version from: https://googlechromelabs.github.io/chrome-for-testing/")
+            
             if hasattr(self, 'driver'):
-                self.driver.quit()
+                try:
+                    self.driver.quit()
+                except:
+                    pass
             raise
     
     def close_browser(self):
@@ -176,14 +246,17 @@ class RedditAccountSniperBot:
         if self.debug_mode:
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
             try:
-                screenshot_path = f"{prefix}_screenshot_{timestamp}.png"
-                self.driver.save_screenshot(screenshot_path)
-                logger.info(f"Saved screenshot to {screenshot_path}")
-                
-                html_path = f"{prefix}_page_{timestamp}.html"
-                with open(html_path, "w", encoding="utf-8") as f:
-                    f.write(self.driver.page_source)
-                logger.info(f"Saved page source to {html_path}")
+                if hasattr(self, 'driver'):
+                    screenshot_path = f"{prefix}_screenshot_{timestamp}.png"
+                    self.driver.save_screenshot(screenshot_path)
+                    logger.info(f"Saved screenshot to {screenshot_path}")
+                    
+                    html_path = f"{prefix}_page_{timestamp}.html"
+                    with open(html_path, "w", encoding="utf-8") as f:
+                        f.write(self.driver.page_source)
+                    logger.info(f"Saved page source to {html_path}")
+                else:
+                    logger.warning("Can't save debug info: driver not initialized or already closed")
             except Exception as e:
                 logger.error(f"Failed to save debug info: {str(e)}")
     
@@ -554,21 +627,40 @@ class RedditAccountSniperBot:
     def solve_captcha(self):
         try:
             self.driver.switch_to.default_content()
-            logger.info("Starting CAPTCHA solution process with RecaptchaSolver...")
+            logger.info("Starting CAPTCHA solution process with NextCaptcha...")
             
             if self.debug_mode:
                 self.driver.save_screenshot("captcha_initial.png")
             
             # Check if reCAPTCHA is present
             recaptcha_present = False
+            recaptcha_key = None
             
             try:
-                iframes = self.driver.find_elements(By.TAG_NAME, "iframe")
-                for iframe in iframes:
-                    src = iframe.get_attribute("src") or ""
-                    if "google.com/recaptcha" in src:
-                        recaptcha_present = True
-                        break
+                # First try to find the site key in any div with g-recaptcha class
+                g_recaptcha_divs = self.driver.find_elements(By.CLASS_NAME, "g-recaptcha")
+                if g_recaptcha_divs:
+                    recaptcha_present = True
+                    for div in g_recaptcha_divs:
+                        key = div.get_attribute("data-sitekey")
+                        if key:
+                            recaptcha_key = key
+                            logger.info(f"Found reCAPTCHA key: {recaptcha_key}")
+                            break
+                
+                # Check in iframes if no key found yet
+                if not recaptcha_key:
+                    iframes = self.driver.find_elements(By.TAG_NAME, "iframe")
+                    for iframe in iframes:
+                        src = iframe.get_attribute("src") or ""
+                        if "google.com/recaptcha" in src:
+                            recaptcha_present = True
+                            # Try to extract the site key from the iframe src
+                            key_match = re.search(r"k=([^&]+)", src)
+                            if key_match:
+                                recaptcha_key = key_match.group(1)
+                                logger.info(f"Found reCAPTCHA key in iframe: {recaptcha_key}")
+                                break
             except Exception as e:
                 logger.error(f"Error detecting reCAPTCHA: {str(e)}")
             
@@ -576,122 +668,182 @@ class RedditAccountSniperBot:
                 logger.info("No reCAPTCHA detected on the page")
                 return True
             
-            logger.info("reCAPTCHA detected, attempting to solve...")
+            if not recaptcha_key:
+                logger.error("reCAPTCHA detected but could not find the site key")
+                return False
+            
+            logger.info("reCAPTCHA detected, attempting to solve with NextCaptcha...")
             
             try:
-                # Import the RecaptchaSolver
-                from RecaptchaSolver import RecaptchaSolver
+                # Import required libraries for NextCaptcha
+                import requests
+                import time
+                
+                # NextCaptcha API credentials
+                api_key = "next_887d0a4fd8fd346ae9cff5b6dbc0106428"
+                
+                # Current URL where the CAPTCHA is located
+                page_url = self.driver.current_url
+                
+                # Create a session for API requests
+                session = requests.Session()
+                
+                # Step 1: Create a task to solve the reCAPTCHA
+                logger.info("Creating reCAPTCHA solving task...")
+                create_task_payload = {
+                    "clientKey": api_key,
+                    "task": {
+                        "type": "RecaptchaV2TaskProxyless",
+                        "websiteURL": page_url,
+                        "websiteKey": recaptcha_key,
+                        "isInvisible": False  # Set to True if it's invisible reCAPTCHA
+                    }
+                }
+                
+                create_task_url = "https://api.nextcaptcha.com/createTask"
                 
                 try:
-                    # Create a new ChromiumPage (without any arguments as in captcha_test.py)
-                    from DrissionPage import ChromiumPage
+                    response = session.post(create_task_url, json=create_task_payload)
+                    response_data = response.json()
                     
-                    # Get the current URL where the CAPTCHA is
-                    current_url = self.driver.current_url
+                    if response.status_code != 200 or not response_data.get("taskId"):
+                        logger.error(f"Failed to create task: {response_data.get('errorDescription', 'Unknown error')}")
+                        return False
                     
-                    # Create a fresh ChromiumPage instance
-                    page = ChromiumPage()  # No arguments - matches your sample code
+                    task_id = response_data["taskId"]
+                    logger.info(f"Task created successfully, ID: {task_id}")
                     
-                    # First login with the new browser if credentials are provided
-                    if self.user_email and self.user_password:
-                        logger.info("Logging in with ChromiumPage before solving CAPTCHA...")
+                    # Step 2: Get the solution
+                    get_solution_url = "https://api.nextcaptcha.com/getTaskResult"
+                    get_solution_payload = {
+                        "clientKey": api_key,
+                        "taskId": task_id
+                    }
+                    
+                    # Poll for solution with exponential backoff
+                    max_attempts = 15
+                    for attempt in range(1, max_attempts + 1):
+                        logger.info(f"Waiting for solution (attempt {attempt}/{max_attempts})...")
+                        time.sleep(5)  # Wait 5 seconds between checks
                         
-                        # Navigate to login page
-                        page.get("https://redaccs.com/my-account/")
+                        solution_response = session.post(get_solution_url, json=get_solution_payload)
+                        solution_data = solution_response.json()
                         
-                        # Wait for page to load
-                        time.sleep(3)
-                        
-                        # Fill username and password
-                        try:
-                            username_field = page.ele('#username')
-                            password_field = page.ele('#password')
-                            
-                            if username_field and password_field:
-                                username_field.input(self.user_email)
-                                password_field.input(self.user_password)
+                        if solution_data.get("status") == "ready":
+                            token = solution_data.get("solution", {}).get("gRecaptchaResponse")
+                            if token:
+                                logger.info("Successfully obtained reCAPTCHA token from NextCaptcha")
                                 
-                                # Click login button
-                                login_button = page.ele('button[name="login"]')
-                                if login_button:
-                                    login_button.click()
-                                    logger.info("Login credentials submitted in ChromiumPage")
-                                    time.sleep(3)  # Wait for login to complete
-                                else:
-                                    logger.warning("Login button not found in ChromiumPage")
-                            else:
-                                logger.warning("Login fields not found in ChromiumPage")
-                        except Exception as e:
-                            logger.error(f"Error during ChromiumPage login: {str(e)}")
-                    
-                    # Navigate to the same URL where the CAPTCHA is
-                    page.get(current_url)
-                    logger.info(f"Navigated to CAPTCHA page: {current_url}")
-                    
-                    # Give the page time to load
-                    time.sleep(3)
-                    
-                    # Initialize and use the RecaptchaSolver
-                    solver = RecaptchaSolver(page)
-                    logger.info("Solving reCAPTCHA using RecaptchaSolver...")
-                    solver.solveCaptcha()
-                    
-                    # Get token if available
-                    token = solver.get_token()
-                    if token:
-                        logger.info("Successfully obtained reCAPTCHA token")
-                        
-                        # Apply the token to the original Selenium driver
-                        self.driver.execute_script(f"""
-                            try {{
-                                document.querySelector('[name="g-recaptcha-response"]').innerHTML = "{token}";
-                            }} catch(e) {{}}
-                            
-                            var textareas = document.getElementsByTagName('textarea');
-                            for (var i = 0; i < textareas.length; i++) {{
-                                if (textareas[i].name == 'g-recaptcha-response') {{
-                                    textareas[i].innerHTML = "{token}";
-                                }}
-                            }}
-                            
-                            if (typeof ___grecaptcha_cfg !== 'undefined') {{
-                                for (var key in ___grecaptcha_cfg.clients) {{
-                                    if (___grecaptcha_cfg.clients[key].hasOwnProperty('callback')) {{
-                                        try {{
-                                            ___grecaptcha_cfg.clients[key]['callback']("{token}");
-                                            break;
-                                        }} catch(e) {{}}
+                                # Apply the token to the Selenium driver
+                                self.driver.execute_script(f"""
+                                    try {{
+                                        document.querySelector('[name="g-recaptcha-response"]').innerHTML = "{token}";
+                                    }} catch(e) {{}}
+                                    
+                                    var textareas = document.getElementsByTagName('textarea');
+                                    for (var i = 0; i < textareas.length; i++) {{
+                                        if (textareas[i].name == 'g-recaptcha-response') {{
+                                            textareas[i].innerHTML = "{token}";
+                                        }}
                                     }}
-                                }}
-                            }}
-                        """)
-                        
-                        logger.info("reCAPTCHA token applied to the page")
-                        time.sleep(2)
-                        return True
-                    else:
-                        logger.error("Failed to get reCAPTCHA token")
-                        
-                    # Check if it was solved even without getting the token
-                    if solver.is_solved():
-                        logger.info("reCAPTCHA appears to be solved without token retrieval")
-                        return True
-                        
-                    logger.error("RecaptchaSolver failed to solve the CAPTCHA")
+                                    
+                                    if (typeof ___grecaptcha_cfg !== 'undefined') {{
+                                        for (var key in ___grecaptcha_cfg.clients) {{
+                                            if (___grecaptcha_cfg.clients[key].hasOwnProperty('callback')) {{
+                                                try {{
+                                                    ___grecaptcha_cfg.clients[key]['callback']("{token}");
+                                                    break;
+                                                }} catch(e) {{}}
+                                            }}
+                                        }}
+                                    }}
+                                """)
+                                
+                                logger.info("reCAPTCHA token applied to the page")
+                                
+                                # Now try to reclick the checkbox to ensure it shows a checkmark
+                                try:
+                                    logger.info("Attempting to click the reCAPTCHA checkbox to ensure it shows a checkmark...")
+                                    
+                                    # First find all recaptcha iframes
+                                    recaptcha_iframes = self.driver.find_elements(By.CSS_SELECTOR, 'iframe[src*="google.com/recaptcha"]')
+                                    if recaptcha_iframes:
+                                        # Try to find the checkbox iframe (usually the first one)
+                                        checkbox_iframe = None
+                                        for iframe in recaptcha_iframes:
+                                            title = iframe.get_attribute("title")
+                                            if title and ("recaptcha" in title.lower() or "challenge" not in title.lower()):
+                                                checkbox_iframe = iframe
+                                                break
+                                        
+                                        if checkbox_iframe:
+                                            logger.info("Found reCAPTCHA checkbox iframe")
+                                            
+                                            # Switch to the iframe
+                                            self.driver.switch_to.frame(checkbox_iframe)
+                                            
+                                            # Try to find and click the checkbox
+                                            try:
+                                                checkbox = self.short_wait.until(
+                                                    EC.element_to_be_clickable((By.CSS_SELECTOR, "div.recaptcha-checkbox-border"))
+                                                )
+                                                logger.info("Clicking reCAPTCHA checkbox")
+                                                checkbox.click()
+                                                time.sleep(1)
+                                                
+                                                # Check if it's properly checked (has a checkmark)
+                                                is_checked = self.driver.find_elements(By.CSS_SELECTOR, "div.recaptcha-checkbox-checked")
+                                                if is_checked:
+                                                    logger.info("reCAPTCHA checkbox is now checked (has checkmark)")
+                                                else:
+                                                    logger.warning("Clicked reCAPTCHA checkbox but checkmark is not visible")
+                                            except Exception as e:
+                                                logger.warning(f"Could not click checkbox: {str(e)}")
+                                            
+                                            # Switch back to default content
+                                            self.driver.switch_to.default_content()
+                                        else:
+                                            logger.warning("Could not identify the checkbox iframe")
+                                    else:
+                                        logger.warning("No reCAPTCHA iframes found for clicking checkbox")
+                                except Exception as e:
+                                    logger.warning(f"Error trying to reclick reCAPTCHA checkbox: {str(e)}")
+                                    # Switch back to default content just in case
+                                    try:
+                                        self.driver.switch_to.default_content()
+                                    except:
+                                        pass
+                                
+                                # Take a screenshot to verify if it worked
+                                if self.debug_mode:
+                                    self.driver.save_screenshot("captcha_after_solution.png")
+                                    logger.info("Saved screenshot after CAPTCHA solution")
+                                
+                                time.sleep(2)
+                                return True
+                            else:
+                                logger.error("Solution ready but no token received")
+                                return False
+                        elif solution_data.get("status") == "processing":
+                            continue
+                        else:
+                            logger.error(f"Error in solution: {solution_data.get('errorDescription', 'Unknown error')}")
+                            return False
+                    
+                    logger.error("Maximum attempts reached waiting for CAPTCHA solution")
                     return False
-                        
-                except ImportError as e:
-                    logger.error(f"DrissionPage library not installed or has issues: {str(e)}")
-                    logger.error("Please install it with: pip install DrissionPage")
+                    
+                except requests.RequestException as e:
+                    logger.error(f"API request error: {str(e)}")
                     return False
-                        
+                    
             except ImportError as e:
-                logger.error(f"RecaptchaSolver not properly installed or has missing dependencies: {str(e)}")
-                logger.error("Please ensure RecaptchaSolver.py is in the current directory")
+                logger.error(f"Required library not installed: {str(e)}")
+                logger.error("Please install it with: pip install requests")
                 return False
                     
             except Exception as e:
-                logger.error(f"Error using RecaptchaSolver: {str(e)}")
+                logger.error(f"Error using NextCaptcha: {str(e)}")
                 return False
                 
         except Exception as e:
@@ -699,7 +851,7 @@ class RedditAccountSniperBot:
             if self.debug_mode:
                 self.save_debug_info("captcha_error")
             return False
-            
+    
     def complete_order(self):
         """Find and click the place_order button, handling CAPTCHA if present"""
         try:
@@ -793,7 +945,12 @@ class RedditAccountSniperBot:
     
     def run(self):
         try:
-            self.start_browser()
+            try:
+                self.start_browser()
+            except Exception as e:
+                logger.error(f"Failed to start browser: {str(e)}")
+                logger.error("Please make sure Chrome is installed and up to date")
+                return
         
             # Login only if credentials were provided
             if self.user_email and self.user_password:
@@ -948,10 +1105,6 @@ if __name__ == "__main__":
             json.dump(example_config, f, indent=4)
             
         print(f"Example config file created at '{config_file}'")
-        print("Edit this file with your information, then run the script again.")
-        print("\nTo enable automated CAPTCHA solving:")
-        print("1. Download the Buster extension from Chrome Web Store")
-        print("2. Export the extension as buster.crx and place it in the same directory as this script")
         exit(1)
     
     # Create and run the bot

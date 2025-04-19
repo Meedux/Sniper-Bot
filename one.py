@@ -5,6 +5,8 @@ import json
 import os
 import logging
 import sys
+import requests
+from urllib.parse import urlparse
 from datetime import datetime
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
@@ -15,6 +17,12 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.common.action_chains import ActionChains
 from selenium.common.exceptions import TimeoutException, NoSuchElementException, ElementClickInterceptedException, StaleElementReferenceException
+
+# NextCaptcha API key
+NEXTCAPTCHA_API_KEY = "next_887d0a4fd8fd346ae9cff5b6dbc0106428"
+# Updated API endpoints based on NextCaptcha's blog
+NEXTCAPTCHA_CREATE_TASK_URL = "https://api.nextcaptcha.com/createTask"
+NEXTCAPTCHA_GET_RESULT_URL = "https://api.nextcaptcha.com/getTaskResult"
 
 if sys.stdout.encoding != 'utf-8':
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
@@ -602,47 +610,265 @@ class RedditAccountSniperBot:
             return False
     
     def detect_captcha(self):
-        """Detect if captcha is present on the page"""
-        captcha_indicators = [
-            "g-recaptcha",
-            "recaptcha",
-            "h-captcha",
-            "hcaptcha",
-            "captcha"
-        ]
-        
-        for indicator in captcha_indicators:
-            try:
-                captcha_elements = self.driver.find_elements(By.XPATH, 
-                                                        f"//*[contains(@class, '{indicator}') or contains(@id, '{indicator}')]")
-                if captcha_elements:
-                    logger.warning(f"CAPTCHA detected on page ({indicator})")
-                    return True
-            except Exception:
-                pass
-        
-        return False
-    
-    def handle_captcha(self):
-        """Handle captcha by prompting user to solve it"""
-        if self.detect_captcha():
-            logger.warning("CAPTCHA detected - manual solving required")
+        """Detect if captcha is present on the page and return its type (recaptcha/hcaptcha)"""
+        try:
+            # Look for reCAPTCHA iframe
+            recaptcha_iframe = self.driver.find_elements(By.CSS_SELECTOR, 'iframe[src*="google.com/recaptcha"]')
+            if recaptcha_iframe:
+                logger.info("reCAPTCHA detected on the page")
+                return True, "recaptcha", recaptcha_iframe[0]
             
-            if not self.headless:
-                logger.info("Please solve the CAPTCHA manually and press Enter in the console to continue...")
-                input("Press Enter after solving the CAPTCHA...")
+            # Look for reCAPTCHA div
+            recaptcha_div = self.driver.find_elements(By.CSS_SELECTOR, 'div.g-recaptcha, div[data-sitekey]')
+            if recaptcha_div:
+                logger.info("reCAPTCHA div detected on the page")
+                return True, "recaptcha", None
+            
+            # Look for hCaptcha iframe
+            hcaptcha_iframe = self.driver.find_elements(By.CSS_SELECTOR, 'iframe[src*="hcaptcha.com"]')
+            if hcaptcha_iframe:
+                logger.info("hCaptcha detected on the page")
+                return True, "hcaptcha", hcaptcha_iframe[0]
+            
+            # Look for hCaptcha div
+            hcaptcha_div = self.driver.find_elements(By.CSS_SELECTOR, 'div.h-captcha, div[data-sitekey][data-hcaptcha]')
+            if hcaptcha_div:
+                logger.info("hCaptcha div detected on the page")
+                return True, "hcaptcha", None
+            
+            # No CAPTCHA found
+            return False, None, None
+            
+        except Exception as e:
+            logger.error(f"Error detecting CAPTCHA: {str(e)}")
+            return False, None, None
+    
+    def solve_captcha(self):
+        """Solve reCAPTCHA using NextCaptcha API service"""
+        try:
+            self.driver.switch_to.default_content()
+            logger.info("Starting CAPTCHA solution process with NextCaptcha API...")
+            
+            # First detect the type of CAPTCHA and get relevant info
+            has_captcha, captcha_type, captcha_iframe = self.detect_captcha()
+            
+            if not has_captcha:
+                logger.info("No CAPTCHA detected, proceeding")
                 return True
+            
+            # Extract site key and page URL
+            page_url = self.driver.current_url
+            
+            # For reCAPTCHA - implement using NextCaptcha's blog approach
+            if captcha_type == "recaptcha":
+                # Extract site key
+                site_key = self.driver.execute_script("""
+                    var recaptchaElements = document.querySelectorAll('div.g-recaptcha, div[data-sitekey]');
+                    for (var i = 0; i < recaptchaElements.length; i++) {
+                        var siteKey = recaptchaElements[i].getAttribute('data-sitekey');
+                        if (siteKey) return siteKey;
+                    }
+                    return '';
+                """)
+                
+                if not site_key:
+                    logger.error("Could not find reCAPTCHA site key")
+                    return False
+                
+                logger.info(f"Found reCAPTCHA site key: {site_key}")
+                
+                # Check if it's V2 or V3
+                is_v3 = self.driver.execute_script("""
+                    return document.querySelector('.grecaptcha-badge') !== null;
+                """)
+                
+                # Prepare payload based on reCAPTCHA version
+                if is_v3:
+                    task_type = "RecaptchaV3TaskProxyless"
+                    task_action = "submit"  # Default action
+                else:
+                    task_type = "RecaptchaV2TaskProxyless"
+                    task_action = None
+                
+                # Create payload
+                payload = {
+                    "clientKey": NEXTCAPTCHA_API_KEY,
+                    "task": {
+                        "type": task_type,
+                        "websiteURL": page_url,
+                        "websiteKey": site_key
+                    }
+                }
+                
+                # Add action for V3
+                if task_action:
+                    payload["task"]["pageAction"] = task_action
+                
+                logger.info(f"Sending {task_type} solution request to NextCaptcha API...")
+            
+            # For hCaptcha
+            elif captcha_type == "hcaptcha":
+                # Get hCaptcha site key
+                site_key = self.driver.execute_script("""
+                    var hcaptchaElements = document.querySelectorAll('[data-sitekey]');
+                    for (var i = 0; i < hcaptchaElements.length; i++) {
+                        var siteKey = hcaptchaElements[i].getAttribute('data-sitekey');
+                        if (siteKey) return siteKey;
+                    }
+                    return '';
+                """)
+                
+                if not site_key:
+                    logger.error("Could not find hCaptcha site key")
+                    return False
+                    
+                logger.info(f"Found hCaptcha site key: {site_key}")
+                
+                # Prepare the payload for NextCaptcha API
+                payload = {
+                    "clientKey": NEXTCAPTCHA_API_KEY,
+                    "task": {
+                        "type": "HCaptchaTaskProxyless",
+                        "websiteURL": page_url,
+                        "websiteKey": site_key
+                    }
+                }
+                
+                logger.info("Sending hCaptcha solution request to NextCaptcha API...")
+            
             else:
-                logger.error("CAPTCHA detected in headless mode - cannot solve automatically")
+                logger.error(f"Unknown CAPTCHA type: {captcha_type}")
                 return False
-        
-        return True
+            
+            # Make the API request to create task
+            response = requests.post(NEXTCAPTCHA_CREATE_TASK_URL, json=payload)
+            
+            if response.status_code != 200:
+                logger.error(f"NextCaptcha API error: {response.status_code} - {response.text}")
+                return False
+            
+            response_data = response.json()
+            
+            if response_data.get("errorId") != 0:
+                logger.error(f"NextCaptcha API error: {response_data}")
+                return False
+            
+            task_id = response_data.get("taskId")
+            logger.info(f"Solution request accepted. Task ID: {task_id}")
+            
+            # Poll for results
+            solution = None
+            max_attempts = 60
+            
+            for attempt in range(max_attempts):
+                check_payload = {"clientKey": NEXTCAPTCHA_API_KEY, "taskId": task_id}
+                
+                check_response = requests.post(NEXTCAPTCHA_GET_RESULT_URL, json=check_payload)
+                
+                if check_response.status_code != 200:
+                    logger.error(f"NextCaptcha check error: {check_response.status_code} - {check_response.text}")
+                    time.sleep(2)
+                    continue
+                
+                check_data = check_response.json()
+                
+                if check_data.get("errorId") != 0:
+                    logger.error(f"NextCaptcha solution error: {check_data}")
+                    time.sleep(2)
+                    continue
+                
+                if check_data.get("status") == "ready":
+                    solution = check_data.get("solution", {})
+                    logger.info("Successfully obtained CAPTCHA token from NextCaptcha")
+                    break
+                
+                logger.info(f"Solution pending. Waiting... (Attempt {attempt+1}/{max_attempts})")
+                time.sleep(3)
+            
+            if not solution:
+                logger.error(f"Timed out waiting for NextCaptcha solution after {max_attempts} attempts")
+                return False
+            
+            # Apply the token to the page
+            if captcha_type == "recaptcha":
+                token = solution.get("gRecaptchaResponse")
+                
+                # Apply token to page
+                self.driver.execute_script(f"""
+                    try {{
+                        document.querySelector('[name="g-recaptcha-response"]').innerHTML = "{token}";
+                    }} catch(e) {{}}
+                    
+                    var textareas = document.getElementsByTagName('textarea');
+                    for (var i = 0; i < textareas.length; i++) {{
+                        if (textareas[i].name == 'g-recaptcha-response') {{
+                            textareas[i].innerHTML = "{token}";
+                        }}
+                    }}
+                    
+                    // For reCAPTCHA V2
+                    if (typeof ___grecaptcha_cfg !== 'undefined') {{
+                        for (var key in ___grecaptcha_cfg.clients) {{
+                            if (___grecaptcha_cfg.clients[key].hasOwnProperty('callback')) {{
+                                try {{
+                                    ___grecaptcha_cfg.clients[key]['callback']("{token}");
+                                    break;
+                                }} catch(e) {{}}
+                            }}
+                        }}
+                    }}
+                    
+                    // For reCAPTCHA V3
+                    if (typeof grecaptcha !== 'undefined') {{
+                        try {{
+                            grecaptcha.enterprise ? grecaptcha.enterprise.execute() : grecaptcha.execute();
+                        }} catch(e) {{}}
+                    }}
+                """)
+                
+                logger.info("reCAPTCHA token applied to the page")
+                
+            elif captcha_type == "hcaptcha":
+                token = solution.get("token")
+                
+                # Apply token to page
+                self.driver.execute_script(f"""
+                    try {{
+                        document.querySelector('[name="h-captcha-response"]').innerHTML = "{token}";
+                    }} catch(e) {{}}
+                    
+                    var textareas = document.getElementsByTagName('textarea');
+                    for (var i = 0; i < textareas.length; i++) {{
+                        if (textareas[i].name == 'h-captcha-response') {{
+                            textareas[i].innerHTML = "{token}";
+                        }}
+                    }}
+                    
+                    // Trigger callback if available
+                    if (window.hcaptcha) {{
+                        try {{
+                            window.hcaptcha.execute();
+                        }} catch(e) {{}}
+                    }}
+                """)
+                
+                logger.info("hCaptcha token applied to the page")
+            
+            # Allow time for token to be processed
+            time.sleep(2)
+            return True
+                
+        except Exception as e:
+            logger.error(f"Error solving CAPTCHA with NextCaptcha: {str(e)}")
+            if self.debug_mode:
+                self.save_debug_info("captcha_error")
+            return False
     
     def complete_order(self):
         """Find and click the place_order button"""
         try:
             # Handle captcha if present
-            if not self.handle_captcha():
+            if not self.solve_captcha():
                 logger.error("Failed to handle captcha")
                 return False
             
