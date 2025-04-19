@@ -734,7 +734,11 @@ class RedditAccountSniperBot:
                             if token:
                                 logger.info("Successfully obtained reCAPTCHA token from NextCaptcha")
                                 
-                                # Apply the token to the Selenium driver
+                                # First, find the checkbox iframe and try to click it directly
+                                self.mark_recaptcha_checkbox_checked()
+                                
+                                # Also apply the token to ensure it works if visual clicking doesn't work
+                                logger.info("Applying reCAPTCHA token to the page...")
                                 self.driver.execute_script(f"""
                                     try {{
                                         document.querySelector('[name="g-recaptcha-response"]').innerHTML = "{token}";
@@ -757,62 +761,23 @@ class RedditAccountSniperBot:
                                             }}
                                         }}
                                     }}
+                                    
+                                    // Attempt to trigger completed state display
+                                    try {{
+                                        // This marks the recaptcha as visually solved
+                                        var checkboxes = document.querySelectorAll(".recaptcha-checkbox");
+                                        for (var i = 0; i < checkboxes.length; i++) {{
+                                            checkboxes[i].classList.add("recaptcha-checkbox-checked");
+                                            checkboxes[i].setAttribute("aria-checked", "true");
+                                        }}
+                                    }} catch(e) {{}}
                                 """)
                                 
                                 logger.info("reCAPTCHA token applied to the page")
                                 
-                                # Now try to reclick the checkbox to ensure it shows a checkmark
-                                try:
-                                    logger.info("Attempting to click the reCAPTCHA checkbox to ensure it shows a checkmark...")
-                                    
-                                    # First find all recaptcha iframes
-                                    recaptcha_iframes = self.driver.find_elements(By.CSS_SELECTOR, 'iframe[src*="google.com/recaptcha"]')
-                                    if recaptcha_iframes:
-                                        # Try to find the checkbox iframe (usually the first one)
-                                        checkbox_iframe = None
-                                        for iframe in recaptcha_iframes:
-                                            title = iframe.get_attribute("title")
-                                            if title and ("recaptcha" in title.lower() or "challenge" not in title.lower()):
-                                                checkbox_iframe = iframe
-                                                break
-                                        
-                                        if checkbox_iframe:
-                                            logger.info("Found reCAPTCHA checkbox iframe")
-                                            
-                                            # Switch to the iframe
-                                            self.driver.switch_to.frame(checkbox_iframe)
-                                            
-                                            # Try to find and click the checkbox
-                                            try:
-                                                checkbox = self.short_wait.until(
-                                                    EC.element_to_be_clickable((By.CSS_SELECTOR, "div.recaptcha-checkbox-border"))
-                                                )
-                                                logger.info("Clicking reCAPTCHA checkbox")
-                                                checkbox.click()
-                                                time.sleep(1)
-                                                
-                                                # Check if it's properly checked (has a checkmark)
-                                                is_checked = self.driver.find_elements(By.CSS_SELECTOR, "div.recaptcha-checkbox-checked")
-                                                if is_checked:
-                                                    logger.info("reCAPTCHA checkbox is now checked (has checkmark)")
-                                                else:
-                                                    logger.warning("Clicked reCAPTCHA checkbox but checkmark is not visible")
-                                            except Exception as e:
-                                                logger.warning(f"Could not click checkbox: {str(e)}")
-                                            
-                                            # Switch back to default content
-                                            self.driver.switch_to.default_content()
-                                        else:
-                                            logger.warning("Could not identify the checkbox iframe")
-                                    else:
-                                        logger.warning("No reCAPTCHA iframes found for clicking checkbox")
-                                except Exception as e:
-                                    logger.warning(f"Error trying to reclick reCAPTCHA checkbox: {str(e)}")
-                                    # Switch back to default content just in case
-                                    try:
-                                        self.driver.switch_to.default_content()
-                                    except:
-                                        pass
+                                # Try again to mark the checkbox as checked after token application
+                                time.sleep(1)
+                                self.mark_recaptcha_checkbox_checked()
                                 
                                 # Take a screenshot to verify if it worked
                                 if self.debug_mode:
@@ -850,6 +815,120 @@ class RedditAccountSniperBot:
             logger.error(f"Unexpected error in CAPTCHA solving: {str(e)}")
             if self.debug_mode:
                 self.save_debug_info("captcha_error")
+            return False
+            
+    def mark_recaptcha_checkbox_checked(self):
+        """Enhanced method to ensure reCAPTCHA checkbox appears checked"""
+        logger.info("Attempting to mark reCAPTCHA checkbox as checked...")
+        
+        try:
+            # Switch back to default content before starting
+            self.driver.switch_to.default_content()
+            
+            # First find all recaptcha iframes
+            recaptcha_iframes = self.driver.find_elements(By.CSS_SELECTOR, 'iframe[src*="google.com/recaptcha"]')
+            checkbox_iframe = None
+            
+            if not recaptcha_iframes:
+                logger.warning("No reCAPTCHA iframes found")
+                return False
+                
+            logger.info(f"Found {len(recaptcha_iframes)} reCAPTCHA iframes")
+            
+            # Try to find the checkbox iframe
+            for iframe in recaptcha_iframes:
+                title = iframe.get_attribute("title") or ""
+                src = iframe.get_attribute("src") or ""
+                
+                # The checkbox iframe typically has "recaptcha" in title and doesn't contain "challenge"
+                if (("recaptcha" in title.lower() and "challenge" not in title.lower()) or 
+                    ("anchor" in src and "challenge" not in src)):
+                    checkbox_iframe = iframe
+                    logger.info(f"Found potential checkbox iframe with title: {title}")
+                    break
+            
+            if not checkbox_iframe:
+                # If we couldn't identify by title, just try the first iframe
+                logger.warning("Could not identify the checkbox iframe by title, trying first iframe")
+                checkbox_iframe = recaptcha_iframes[0]
+            
+            # Switch to the iframe
+            logger.info("Switching to checkbox iframe")
+            self.driver.switch_to.frame(checkbox_iframe)
+            
+            # Try multiple ways to find and click the checkbox
+            checkbox_selectors = [
+                "div.recaptcha-checkbox-border",
+                "div.recaptcha-checkbox-checkmark",
+                "div.recaptcha-checkbox",
+                "span.recaptcha-checkbox"
+            ]
+            
+            clicked = False
+            for selector in checkbox_selectors:
+                try:
+                    checkbox_elements = self.driver.find_elements(By.CSS_SELECTOR, selector)
+                    if checkbox_elements:
+                        logger.info(f"Found checkbox element with selector: {selector}")
+                        
+                        # First check if already checked
+                        is_checked = len(self.driver.find_elements(By.CSS_SELECTOR, "div.recaptcha-checkbox-checked")) > 0
+                        
+                        if is_checked:
+                            logger.info("Checkbox is already checked")
+                            clicked = True
+                            break
+                        
+                        # Try clicking the element
+                        logger.info(f"Attempting to click checkbox with selector: {selector}")
+                        checkbox_elements[0].click()
+                        time.sleep(1)
+                        
+                        # Verify if checkbox is now checked
+                        is_checked = len(self.driver.find_elements(By.CSS_SELECTOR, "div.recaptcha-checkbox-checked")) > 0
+                        if is_checked:
+                            logger.info("Successfully clicked checkbox - checkmark is visible")
+                            clicked = True
+                            break
+                        else:
+                            logger.warning("Clicked checkbox but checkmark is not visible")
+                            
+                        # Also try using JavaScript to mark it as checked
+                        self.driver.execute_script("""
+                            try {
+                                var checkboxes = document.querySelectorAll(".recaptcha-checkbox");
+                                for (var i = 0; i < checkboxes.length; i++) {
+                                    checkboxes[i].classList.add("recaptcha-checkbox-checked");
+                                    checkboxes[i].setAttribute("aria-checked", "true");
+                                }
+                            } catch(e) {}
+                        """)
+                        
+                        # Check again
+                        is_checked = len(self.driver.find_elements(By.CSS_SELECTOR, "div.recaptcha-checkbox-checked")) > 0
+                        if is_checked:
+                            logger.info("Successfully marked checkbox as checked via JavaScript")
+                            clicked = True
+                            break
+                except Exception as e:
+                    logger.warning(f"Error trying checkbox selector '{selector}': {str(e)}")
+            
+            # Switch back to default content
+            self.driver.switch_to.default_content()
+            
+            if clicked:
+                return True
+            else:
+                logger.warning("Could not visibly mark checkbox as checked using any method")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Error in mark_recaptcha_checkbox_checked: {str(e)}")
+            # Make sure we're back at the default content
+            try:
+                self.driver.switch_to.default_content()
+            except:
+                pass
             return False
     
     def complete_order(self):
