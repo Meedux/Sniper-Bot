@@ -131,21 +131,57 @@ class RedditAccountSniperBot:
             logger.error("Error loading configuration file: %s", str(e))
     
     def start_browser(self):
-        logger.info("Starting browser session")
-        service = Service(ChromeDriverManager().install())
-        self.driver = webdriver.Chrome(service=service, options=self.chrome_options)
+        logger.info("Starting browser session...")
         
-        # Prevent bot detection
-        self.driver.execute_cdp_cmd('Network.setUserAgentOverride', {"userAgent": self.driver.execute_script("return navigator.userAgent").replace("Headless", "")})
-        self.driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-        
-        self.wait = WebDriverWait(self.driver, 10)
-        self.long_wait = WebDriverWait(self.driver, 30)
-        self.actions = ActionChains(self.driver)
-        
-        # Maximize window for better visibility
-        self.driver.maximize_window()
-        return self.driver
+        try:
+            # Docker environment detection
+            in_docker = os.path.exists('/.dockerenv')
+            
+            # Configure Chrome options with Docker-specific settings if needed
+            if in_docker:
+                logger.info("Running in Docker environment")
+                self.chrome_options.add_argument('--no-sandbox')
+                self.chrome_options.add_argument('--disable-dev-shm-usage')
+                # In Docker, we use the chromedriver installed in the container
+                service = Service(executable_path="/usr/local/bin/chromedriver")
+                self.driver = webdriver.Chrome(service=service, options=self.chrome_options)
+                logger.info("Chrome started successfully in Docker container")
+            else:
+                # Non-Docker environment (original logic)
+                service = Service(ChromeDriverManager().install())
+                self.driver = webdriver.Chrome(service=service, options=self.chrome_options)
+                logger.info("Chrome started successfully using ChromeDriverManager")
+            
+            # Prevent bot detection
+            self.driver.execute_cdp_cmd('Network.setUserAgentOverride', 
+                                      {"userAgent": self.driver.execute_script("return navigator.userAgent").replace("Headless", "")})
+            self.driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+            
+            self.wait = WebDriverWait(self.driver, 10)
+            self.long_wait = WebDriverWait(self.driver, 30)
+            self.actions = ActionChains(self.driver)
+            
+            # Maximize window for better visibility
+            self.driver.maximize_window()
+            logger.info("Browser session started successfully")
+            return self.driver
+            
+        except Exception as e:
+            detailed_error = str(e)
+            logger.error(f"Error starting browser session: {detailed_error}")
+            
+            # Provide specific guidance based on common errors
+            if "Chrome failed to start" in detailed_error:
+                logger.error("Chrome browser failed to start. Make sure Chrome is installed and not running in crash-recovery mode.")
+            elif "session not created" in detailed_error:
+                logger.error("Session not created. This typically means the chromedriver version doesn't match your Chrome browser version.")
+            
+            if hasattr(self, 'driver'):
+                try:
+                    self.driver.quit()
+                except:
+                    pass
+            raise
     
     def close_browser(self):
         if hasattr(self, 'driver'):

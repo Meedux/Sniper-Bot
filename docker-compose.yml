@@ -1,0 +1,13 @@
+version: '3.8'
+
+services:
+  redditbot:
+    build: .
+    volumes:
+      - ./:/app
+      - ./config:/app/config
+      - ./logs:/app/logs
+      - ./screenshots:/app/screenshots
+    environment:
+      - TZ=UTC
+    restart: unless-stopped

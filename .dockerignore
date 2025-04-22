@@ -1,0 +1,42 @@
+# Git and version control
+.git
+.gitignore
+
+# Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+build/
+develop-eggs/
+dist/
+eggs/
+.eggs/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+ENV/
+env/
+
+# Log files and screenshots from previous runs
+*.log
+reddit_sniper_*.log
+*_screenshot_*.png
+*_page_*.html
+
+# Local configuration that shouldn't be in the container
+.env
+.env.local
+
+# Docker related
+.dockerignore
+Dockerfile
+docker-compose.yml
+
+# Ignore chromedriver that was downloaded for local use
+chromedriver.exe

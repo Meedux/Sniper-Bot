@@ -141,62 +141,76 @@ class RedditAccountSniperBot:
         logger.info("Starting browser session...")
         
         try:
-            # Prioritize using the local chromedriver.exe that exists in the same directory
-            if os.path.exists("chromedriver.exe"):
-                logger.info("Found local chromedriver.exe, using it directly")
-                try:
-                    service = Service(executable_path=os.path.abspath("chromedriver.exe"))
-                    self.driver = webdriver.Chrome(service=service, options=self.chrome_options)
-                    logger.info("Chrome started successfully using local chromedriver.exe")
-                except Exception as e:
-                    logger.error(f"Error using local chromedriver.exe: {str(e)}")
-                    # If specific architecture error, provide clear guidance
-                    if "not a valid Win32 application" in str(e):
-                        logger.error("The chromedriver.exe is not compatible with your system architecture.")
-                        logger.error("Please download the correct version for your system (32-bit or 64-bit).")
-                        logger.error("Visit: https://googlechromelabs.github.io/chrome-for-testing/")
-                    raise
-            else:
-                # Fallback to webdriver-manager if local chromedriver.exe not found
-                logger.info("No local chromedriver.exe found, using webdriver-manager")
-                
-                # Try to find Chrome version to download matching driver
-                import subprocess
-                import re
-                
-                # Try to determine Chrome version
-                chrome_version = None
-                try:
-                    # For Windows
-                    process = subprocess.Popen(
-                        r'reg query "HKEY_CURRENT_USER\Software\Google\Chrome\BLBeacon" /v version',
-                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True
-                    )
-                    output, error = process.communicate()
-                    if output:
-                        match = re.search(r'version\s+REG_SZ\s+([\d\.]+)', output.decode('utf-8'))
-                        if match:
-                            chrome_version = match.group(1)
-                            logger.info(f"Detected Chrome version: {chrome_version}")
-                except Exception as e:
-                    logger.warning(f"Could not determine Chrome version: {str(e)}")
-                
-                # Create a service
-                if chrome_version:
-                    # Extract major version
-                    major_version = chrome_version.split('.')[0]
-                    try:
-                        service = Service(ChromeDriverManager(version=major_version).install())
-                        logger.info(f"Using ChromeDriver version matching Chrome {major_version}")
-                    except Exception as e:
-                        logger.warning(f"Failed to find ChromeDriver for version {major_version}, falling back to latest: {str(e)}")
-                        service = Service(ChromeDriverManager().install())
-                else:
-                    service = Service(ChromeDriverManager().install())
-                    
-                # Start the browser with the service
+            # Docker environment detection
+            in_docker = os.path.exists('/.dockerenv')
+            
+            # Configure Chrome options with Docker-specific settings if needed
+            if in_docker:
+                logger.info("Running in Docker environment")
+                self.chrome_options.add_argument('--no-sandbox')
+                self.chrome_options.add_argument('--disable-dev-shm-usage')
+                # In Docker, we use the chromedriver installed in the container
+                service = Service(executable_path="/usr/local/bin/chromedriver")
                 self.driver = webdriver.Chrome(service=service, options=self.chrome_options)
-                logger.info("Chrome started successfully using webdriver-manager")
+                logger.info("Chrome started successfully in Docker container")
+            else:
+                # Non-Docker environment (original logic)
+                # Prioritize using the local chromedriver.exe that exists in the same directory
+                if os.path.exists("chromedriver.exe"):
+                    logger.info("Found local chromedriver.exe, using it directly")
+                    try:
+                        service = Service(executable_path=os.path.abspath("chromedriver.exe"))
+                        self.driver = webdriver.Chrome(service=service, options=self.chrome_options)
+                        logger.info("Chrome started successfully using local chromedriver.exe")
+                    except Exception as e:
+                        logger.error(f"Error using local chromedriver.exe: {str(e)}")
+                        # If specific architecture error, provide clear guidance
+                        if "not a valid Win32 application" in str(e):
+                            logger.error("The chromedriver.exe is not compatible with your system architecture.")
+                            logger.error("Please download the correct version for your system (32-bit or 64-bit).")
+                            logger.error("Visit: https://googlechromelabs.github.io/chrome-for-testing/")
+                        raise
+                else:
+                    # Fallback to webdriver-manager if local chromedriver.exe not found
+                    logger.info("No local chromedriver.exe found, using webdriver-manager")
+                    
+                    # Try to find Chrome version to download matching driver
+                    import subprocess
+                    import re
+                    
+                    # Try to determine Chrome version
+                    chrome_version = None
+                    try:
+                        # For Windows
+                        process = subprocess.Popen(
+                            r'reg query "HKEY_CURRENT_USER\Software\Google\Chrome\BLBeacon" /v version',
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True
+                        )
+                        output, error = process.communicate()
+                        if output:
+                            match = re.search(r'version\s+REG_SZ\s+([\d\.]+)', output.decode('utf-8'))
+                            if match:
+                                chrome_version = match.group(1)
+                                logger.info(f"Detected Chrome version: {chrome_version}")
+                    except Exception as e:
+                        logger.warning(f"Could not determine Chrome version: {str(e)}")
+                    
+                    # Create a service
+                    if chrome_version:
+                        # Extract major version
+                        major_version = chrome_version.split('.')[0]
+                        try:
+                            service = Service(ChromeDriverManager(version=major_version).install())
+                            logger.info(f"Using ChromeDriver version matching Chrome {major_version}")
+                        except Exception as e:
+                            logger.warning(f"Failed to find ChromeDriver for version {major_version}, falling back to latest: {str(e)}")
+                            service = Service(ChromeDriverManager().install())
+                    else:
+                        service = Service(ChromeDriverManager().install())
+                        
+                    # Start the browser with the service
+                    self.driver = webdriver.Chrome(service=service, options=self.chrome_options)
+                    logger.info("Chrome started successfully using webdriver-manager")
             
             # Prevent bot detection
             self.driver.execute_cdp_cmd('Network.setUserAgentOverride', 
