@@ -255,21 +255,6 @@ For advanced users, you can modify additional settings by editing `one.py`:
 - Run the bot in a controlled environment
 - Be cautious when providing payment information
 
-## Legal Disclaimer
-
-This tool is provided for educational purposes only. Users are responsible for ensuring their use of the bot complies with:
-- Terms of service of target websites
-- Applicable laws and regulations
-- Reddit's terms of service
-
-## License
-
-This project is licensed under the MIT License - see the LICENSE file for details.
-
-## Support
-
-For questions or support, please open an issue on the GitHub repository.
-
 ---
 
 **Happy Account Sniping!**
