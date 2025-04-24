@@ -140,41 +140,100 @@ class RedditAccountSniperBot:
             # Configure Chrome options with Docker-specific settings if needed
             if in_docker:
                 logger.info("Running in Docker environment")
+                # Add mandatory Docker settings
                 self.chrome_options.add_argument('--no-sandbox')
                 self.chrome_options.add_argument('--disable-dev-shm-usage')
-                # In Docker, we use the chromedriver installed in the container
+                
+                # Add a unique temporary user data directory to avoid conflicts
+                import tempfile
+                temp_dir = tempfile.mkdtemp()
+                self.chrome_options.add_argument(f'--user-data-dir={temp_dir}')
+                
+                # More Docker-specific options to prevent JS errors
+                self.chrome_options.add_argument('--disable-gpu')
+                self.chrome_options.add_argument('--disable-software-rasterizer')
+                self.chrome_options.add_argument('--remote-debugging-port=9222')
+                self.chrome_options.add_argument('--disable-extensions')
+                
+                # In Docker, use the chromedriver at /usr/local/bin/chromedriver
                 service = Service(executable_path="/usr/local/bin/chromedriver")
                 self.driver = webdriver.Chrome(service=service, options=self.chrome_options)
                 logger.info("Chrome started successfully in Docker container")
+                
+                # Set up wait times without using JavaScript
+                self.wait = WebDriverWait(self.driver, 10)
+                self.long_wait = WebDriverWait(self.driver, 30)
+                self.actions = ActionChains(self.driver)
+                
+                # Try to maximize window for better visibility (without JS if possible)
+                try:
+                    self.driver.maximize_window()
+                except Exception as e:
+                    logger.warning(f"Could not maximize window: {str(e)}")
+                    # Try setting window size explicitly instead
+                    self.driver.set_window_size(1920, 1080)
+                
+                logger.info("Browser session started successfully in Docker environment")
+                return self.driver
             else:
                 # Non-Docker environment (original logic)
-                service = Service(ChromeDriverManager().install())
-                self.driver = webdriver.Chrome(service=service, options=self.chrome_options)
-                logger.info("Chrome started successfully using ChromeDriverManager")
+                # First check for the chromedriver file without extension (newly extracted)
+                if os.path.exists("chromedriver"):
+                    logger.info("Found chromedriver file (no extension), using it directly")
+                    try:
+                        service = Service(executable_path=os.path.abspath("chromedriver"))
+                        self.driver = webdriver.Chrome(service=service, options=self.chrome_options)
+                        logger.info("Chrome started successfully using local chromedriver")
+                    except Exception as e:
+                        logger.error(f"Error using chromedriver: {str(e)}")
+                        # If specific architecture error, provide clear guidance
+                        if "not a valid Win32 application" in str(e):
+                            logger.error("The chromedriver is not compatible with your system architecture.")
+                            logger.error("Please download the correct version for your system.")
+                            logger.error("Visit: https://googlechromelabs.github.io/chrome-for-testing/")
+                        raise
+                # Fallback to ChromeDriverManager
+                else:
+                    service = Service(ChromeDriverManager().install())
+                    self.driver = webdriver.Chrome(service=service, options=self.chrome_options)
+                    logger.info("Chrome started successfully using ChromeDriverManager")
             
-            # Prevent bot detection
-            self.driver.execute_cdp_cmd('Network.setUserAgentOverride', 
-                                      {"userAgent": self.driver.execute_script("return navigator.userAgent").replace("Headless", "")})
-            self.driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-            
-            self.wait = WebDriverWait(self.driver, 10)
-            self.long_wait = WebDriverWait(self.driver, 30)
-            self.actions = ActionChains(self.driver)
-            
-            # Maximize window for better visibility
-            self.driver.maximize_window()
-            logger.info("Browser session started successfully")
-            return self.driver
+                # Prevent bot detection - only in non-Docker environment
+                try:
+                    self.driver.execute_cdp_cmd('Network.setUserAgentOverride', 
+                                        {"userAgent": self.driver.execute_script("return navigator.userAgent").replace("Headless", "")})
+                    self.driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+                except Exception as e:
+                    logger.warning(f"Could not apply anti-bot detection: {str(e)}")
+                
+                self.wait = WebDriverWait(self.driver, 10)
+                self.long_wait = WebDriverWait(self.driver, 30)
+                self.actions = ActionChains(self.driver)
+                
+                # Maximize window for better visibility
+                self.driver.maximize_window()
+                logger.info("Browser session started successfully")
+                return self.driver
             
         except Exception as e:
             detailed_error = str(e)
             logger.error(f"Error starting browser session: {detailed_error}")
             
             # Provide specific guidance based on common errors
-            if "Chrome failed to start" in detailed_error:
+            if "not a valid Win32 application" in detailed_error:
+                logger.error("This error typically means you're using a chromedriver that's incompatible with your system architecture.")
+                logger.error("Please download the correct version for your system from:")
+                logger.error("https://googlechromelabs.github.io/chrome-for-testing/")
+            elif "Chrome failed to start" in detailed_error:
                 logger.error("Chrome browser failed to start. Make sure Chrome is installed and not running in crash-recovery mode.")
             elif "session not created" in detailed_error:
                 logger.error("Session not created. This typically means the chromedriver version doesn't match your Chrome browser version.")
+            elif "user data directory is already in use" in detailed_error:
+                logger.error("Chrome user data directory is already in use. This can happen when multiple Chrome instances run.")
+                logger.error("Try restarting Docker to clear any existing Chrome processes.")
+            elif "JavaScript code failed" in detailed_error or "Runtime.evaluate" in detailed_error:
+                logger.error("JavaScript execution failed. This is a common issue in Docker environments.")
+                logger.error("The browser will still work but with limited anti-detection capabilities.")
             
             if hasattr(self, 'driver'):
                 try:

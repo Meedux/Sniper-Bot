@@ -1,0 +1,19 @@
+{
+    "target_url": "https://redaccs.com/shop/",
+    "refresh_interval": 30,
+    "min_karma": 1000,
+    "max_price": 50.0,
+    "headless": false,
+    "test_mode": true,
+    "debug_mode": true,
+    "search_keyword": "50x",
+    "coupon_code": "YOUR_COUPON_HERE",
+    "credentials": {
+        "email": "your_email@example.com",
+        "password": "your_password"
+    },
+    "checkout_info": {
+        "first_name": "John",
+        "last_name": "Doe"
+    }
+}

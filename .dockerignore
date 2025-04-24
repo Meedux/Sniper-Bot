@@ -35,8 +35,7 @@ reddit_sniper_*.log
 
 # Docker related
 .dockerignore
-Dockerfile
-docker-compose.yml
-
-# Ignore chromedriver that was downloaded for local use
-chromedriver.exe
+# Don't exclude chromedriver files
+# chromedriver.exe
+# chromedriver_linux.zip
+# chromedriver
