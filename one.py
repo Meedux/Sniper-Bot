@@ -163,6 +163,7 @@ class RedditAccountSniperBot:
                 # Set up wait times without using JavaScript
                 self.wait = WebDriverWait(self.driver, 10)
                 self.long_wait = WebDriverWait(self.driver, 30)
+                self.short_wait = WebDriverWait(self.driver, 5)
                 self.actions = ActionChains(self.driver)
                 
                 # Try to maximize window for better visibility (without JS if possible)
@@ -192,11 +193,62 @@ class RedditAccountSniperBot:
                             logger.error("Please download the correct version for your system.")
                             logger.error("Visit: https://googlechromelabs.github.io/chrome-for-testing/")
                         raise
-                # Fallback to ChromeDriverManager
+                # Then check for the chromedriver.exe file as a fallback
+                elif os.path.exists("chromedriver.exe"):
+                    logger.info("Found chromedriver.exe, using it directly")
+                    try:
+                        service = Service(executable_path=os.path.abspath("chromedriver.exe"))
+                        self.driver = webdriver.Chrome(service=service, options=self.chrome_options)
+                        logger.info("Chrome started successfully using local chromedriver.exe")
+                    except Exception as e:
+                        logger.error(f"Error using chromedriver.exe: {str(e)}")
+                        # If specific architecture error, provide clear guidance
+                        if "not a valid Win32 application" in str(e):
+                            logger.error("The chromedriver.exe is not compatible with your system architecture.")
+                            logger.error("Please download the correct version for your system (32-bit or 64-bit).")
+                            logger.error("Visit: https://googlechromelabs.github.io/chrome-for-testing/")
+                        raise
                 else:
-                    service = Service(ChromeDriverManager().install())
+                    # Fallback to webdriver-manager if local chromedriver not found
+                    logger.info("No local chromedriver found, using webdriver-manager")
+                    
+                    # Try to find Chrome version to download matching driver
+                    import subprocess
+                    import re
+                    
+                    # Try to determine Chrome version
+                    chrome_version = None
+                    try:
+                        # For Windows
+                        process = subprocess.Popen(
+                            r'reg query "HKEY_CURRENT_USER\Software\Google\Chrome\BLBeacon" /v version',
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True
+                        )
+                        output, error = process.communicate()
+                        if output:
+                            match = re.search(r'version\s+REG_SZ\s+([\d\.]+)', output.decode('utf-8'))
+                            if match:
+                                chrome_version = match.group(1)
+                                logger.info(f"Detected Chrome version: {chrome_version}")
+                    except Exception as e:
+                        logger.warning(f"Could not determine Chrome version: {str(e)}")
+                    
+                    # Create a service
+                    if chrome_version:
+                        # Extract major version
+                        major_version = chrome_version.split('.')[0]
+                        try:
+                            service = Service(ChromeDriverManager(version=major_version).install())
+                            logger.info(f"Using ChromeDriver version matching Chrome {major_version}")
+                        except Exception as e:
+                            logger.warning(f"Failed to find ChromeDriver for version {major_version}, falling back to latest: {str(e)}")
+                            service = Service(ChromeDriverManager().install())
+                    else:
+                        service = Service(ChromeDriverManager().install())
+                        
+                    # Start the browser with the service
                     self.driver = webdriver.Chrome(service=service, options=self.chrome_options)
-                    logger.info("Chrome started successfully using ChromeDriverManager")
+                    logger.info("Chrome started successfully using webdriver-manager")
             
                 # Prevent bot detection - only in non-Docker environment
                 try:
@@ -206,8 +258,10 @@ class RedditAccountSniperBot:
                 except Exception as e:
                     logger.warning(f"Could not apply anti-bot detection: {str(e)}")
                 
+                # Setup wait times
                 self.wait = WebDriverWait(self.driver, 10)
                 self.long_wait = WebDriverWait(self.driver, 30)
+                self.short_wait = WebDriverWait(self.driver, 5)
                 self.actions = ActionChains(self.driver)
                 
                 # Maximize window for better visibility
@@ -222,12 +276,14 @@ class RedditAccountSniperBot:
             # Provide specific guidance based on common errors
             if "not a valid Win32 application" in detailed_error:
                 logger.error("This error typically means you're using a chromedriver that's incompatible with your system architecture.")
-                logger.error("Please download the correct version for your system from:")
+                logger.error("Your Chrome browser and system might be 64-bit while chromedriver is 32-bit (or vice versa).")
+                logger.error("Please download the correct chromedriver version for your system from:")
                 logger.error("https://googlechromelabs.github.io/chrome-for-testing/")
             elif "Chrome failed to start" in detailed_error:
                 logger.error("Chrome browser failed to start. Make sure Chrome is installed and not running in crash-recovery mode.")
             elif "session not created" in detailed_error:
                 logger.error("Session not created. This typically means the chromedriver version doesn't match your Chrome browser version.")
+                logger.error("Download the matching version from: https://googlechromelabs.github.io/chrome-for-testing/")
             elif "user data directory is already in use" in detailed_error:
                 logger.error("Chrome user data directory is already in use. This can happen when multiple Chrome instances run.")
                 logger.error("Try restarting Docker to clear any existing Chrome processes.")
@@ -1050,15 +1106,43 @@ class RedditAccountSniperBot:
                 else:
                     logger.info("Login successful")
             
-            logger.info("Starting Reddit account purchase process")
+            logger.info("Starting Reddit account sniper monitoring...")
             
-            if self.purchase_reddit_account():
-                logger.info("Successfully completed Reddit account purchase!")
-            else:
-                logger.error("Failed to purchase Reddit account")
+            # Keep monitoring and purchasing indefinitely
+            purchases_made = 0
+            refresh_count = 0
             
-        except KeyboardInterrupt:
-            logger.info("Bot stopped by user")
+            try:
+                while True:  # Run indefinitely until interrupted
+                    refresh_count += 1
+                    logger.info(f"Monitoring cycle #{refresh_count}")
+                    
+                    # Navigate to target URL 
+                    if not self.navigate_to_acc_page():
+                        logger.error("Failed to navigate to Reddit accounts page")
+                        logger.info("Waiting 20 seconds before retrying...")
+                        time.sleep(20)
+                        continue
+                    
+                    # Try to find and purchase an account
+                    result = self.purchase_reddit_account()
+                    
+                    if result:
+                        purchases_made += 1
+                        logger.info(f"Successfully completed Reddit account purchase! (Total: {purchases_made})")
+                        logger.info("Continuing to monitor for more accounts...")
+                    else:
+                        logger.info("No suitable accounts found or purchase failed")
+                        
+                    # Wait 20 seconds before next check
+                    logger.info("Waiting 20 seconds before next monitoring cycle...")
+                    time.sleep(20)
+                    
+            except KeyboardInterrupt:
+                logger.info("Monitoring stopped by user")
+                if purchases_made > 0:
+                    logger.info(f"Total successful purchases: {purchases_made}")
+                    
         except Exception as e:
             logger.error(f"Unexpected error: {str(e)}")
             self.save_debug_info("unexpected_error")

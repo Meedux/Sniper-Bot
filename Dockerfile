@@ -70,4 +70,4 @@ RUN echo '#!/bin/bash\nXvfb :99 -screen 0 1920x1080x24 &\nexport DISPLAY=:99\nex
 ENTRYPOINT ["/entrypoint.sh"]
 
 # Default command to run
-CMD ["python", "test.py"]
+CMD ["python", "one.py"]
