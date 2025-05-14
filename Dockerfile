@@ -33,13 +33,23 @@ RUN apt-get update && apt-get install -y \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Google Chrome - Updated method
-RUN wget -q https://dl-ssl.google.com/linux/linux_signing_key.pub -O /usr/share/keyrings/google-chrome.key \
-    && echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.key] https://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list \
-    && apt-get update \
-    && apt-get install -y google-chrome-stable \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
+# Install Chromium as a fallback for ARM64 architecture or Google Chrome for AMD64
+RUN apt-get update && \
+    if [ "$(dpkg --print-architecture)" = "arm64" ] || [ "$(dpkg --print-architecture)" = "aarch64" ]; then \
+      echo "Installing Chromium for ARM64 architecture..." && \
+      apt-get install -y chromium && \
+      ln -s /usr/bin/chromium /usr/bin/google-chrome && \
+      echo "Using Chromium as a replacement for Chrome"; \
+    else \
+      echo "Installing Chrome for AMD64 architecture..." && \
+      wget -q https://dl-ssl.google.com/linux/linux_signing_key.pub -O /usr/share/keyrings/google-chrome.key && \
+      echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.key] https://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list && \
+      apt-get update && \
+      apt-get install -y google-chrome-stable && \
+      echo "Successfully installed Google Chrome"; \
+    fi && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
 
 # Set up working directory
 WORKDIR /app
